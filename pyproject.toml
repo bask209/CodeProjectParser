@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codeparser-llm"
+version = "0.0.1" # Initial version
+description = "A tool to parse codebases into an LLM-ingestible format."
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "Victor Bastidas", email = "victor@vidabasca.com"} # Update with your details
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Text Processing",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+]
+
+# This creates the command-line script `codeparser`
+[project.scripts]
+codeparser = "codeparser_tool.main:cli_entry"
+
+[project.urls]
+Homepage = "https://github.com/bask209/CodeProjectParser"
