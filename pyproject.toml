@@ -21,6 +21,9 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
 ]
+dependencies = [
+    "pathspec>=0.12.1"
+]
 
 # This creates the command-line script `codeparser`
 [project.scripts]

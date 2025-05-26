@@ -1,8 +1,8 @@
 import os
 import argparse
-import fnmatch
 from pathlib import Path
 import sys
+import pathspec 
 
 PROGRAMMING_EXTENSIONS = {
     '.py', '.js', '.ts', '.java', '.c', '.h', '.cpp', '.hpp', '.cs', '.go', '.rb',
@@ -42,41 +42,33 @@ MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 # 10 MB
 FILES_SAMPLE_COUNT = 10 
 
 # --- .gitignore Parsing Logic ---
-def parse_gitignore(gitignore_path):
-    patterns = []
-    if not gitignore_path or not gitignore_path.exists():
-        return patterns
-    try:
-        with open(gitignore_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    patterns.append(line)
-    except Exception as e:
-        print(f"Warning: Could not read or parse .gitignore at {gitignore_path}: {e}")
-    return patterns
+def parse_gitignore(gitignore_path: Path) -> pathspec.PathSpec:
+    """
+    Parses a .gitignore file and returns a PathSpec object.
+    Returns an empty spec if the file doesn't exist or cannot be read.
+    """
+    lines = []
+    if gitignore_path and gitignore_path.exists() and gitignore_path.is_file():
+        try:
+            with open(gitignore_path, 'r', encoding='utf-8') as f:
+                lines = [line for line in f if line.strip() and not line.strip().startswith('#')]
+        except Exception as e:
+            print(f"Warning: Could not read or parse .gitignore at {gitignore_path}: {e}")
+    # 'gitwildmatch' is the style for .gitignore files
+    return pathspec.PathSpec.from_lines('gitwildmatch', lines)
 
-def is_path_ignored(relative_path_str, gitignore_patterns):
-    path_to_check = Path(relative_path_str)
-    for pattern_str in gitignore_patterns:
-        negate = pattern_str.startswith('!')
-        if negate:
-            pattern_str = pattern_str[1:]
-
-        if fnmatch.fnmatch(relative_path_str, pattern_str) or \
-           fnmatch.fnmatch(path_to_check.name, pattern_str):
-            if negate: return False
-            return True
-        
-        if pattern_str.endswith('/'):
-            dir_pattern = pattern_str.rstrip('/')
-            if relative_path_str.startswith(dir_pattern + '/') or relative_path_str == dir_pattern:
-                if negate: return False
-                return True
-    return False
+def is_path_ignored_by_spec(relative_path_str: str, spec: pathspec.PathSpec) -> bool:
+    """
+    Checks if a given relative path string is matched by the PathSpec object.
+    Pathspec expects paths with '/' separators.
+    """
+    # Ensure the path does not have a leading slash for pathspec,
+    # as paths are relative to the .gitignore root.
+    # Our relative_path_str is already correctly formatted (no leading '/').
+    return spec.match_file(relative_path_str)
 
 # --- File Processing Logic ---
-def should_process_file(file_path_obj: Path):
+def should_process_file(file_path_obj: Path): # No changes here
     filename_lower = file_path_obj.name.lower()
     file_ext_lower = file_path_obj.suffix.lower()
 
@@ -96,20 +88,28 @@ def should_process_file(file_path_obj: Path):
     if file_ext_lower in DOCUMENTATION_EXTENSIONS: return True, "documentation"
     if file_ext_lower in CONFIGURATION_FILES_EXTENSIONS_PATTERNS: return True, "configuration_ext"
     
+    # fnmatch import was removed, ensure this still works or replace if it was from fnmatch
+    # This fnmatch is for simple filename patterns, not gitignore logic, so it's okay to keep here if needed.
+    # Let's import fnmatch locally if it's only used here, or ensure it's imported at the top.
+    # For this specific use case, direct string matching might be fine or fnmatch is needed.
+    # The original code used fnmatch, so let's ensure it's available.
+    import fnmatch # Added import here for this specific function, or keep it at the top.
     for pattern in CONFIGURATION_FILES_EXTENSIONS_PATTERNS:
-        if not pattern.startswith('.'):
-            if fnmatch.fnmatch(filename_lower, pattern):
+        if not pattern.startswith('.'): # e.g. 'makefile', 'dockerfile'
+            if fnmatch.fnmatch(filename_lower, pattern): # This fnmatch is for simple name matching
                  return True, "configuration_name"
     return False, "other_extension"
 
 
-def collect_files_for_processing(codebase_path: Path, gitignore_patterns: list, script_own_src_filename: str | None):
+def collect_files_for_processing(codebase_path: Path, gitignore_spec: pathspec.PathSpec, script_own_src_filename: str | None):
     files_to_process = []
     default_ignore_dirs_names = {'.git', '.hg', '.svn', '__pycache__', 'node_modules',
-                                 'vendor', 'build', 'dist', 'target', '.DS_Store',
+                                 'vendor', 'build', 'dist', 'target', '.DS_Store', # .DS_Store is also a file
                                  '.idea', '.vscode', '.venv', 'venv', 'site', 'env'}
-    default_ignore_dirs_patterns = {'*.egg-info'}
-    default_ignore_files = {'.DS_Store'}
+    # For patterns like '*.egg-info', fnmatch is still appropriate for these defaults.
+    import fnmatch # Ensure fnmatch is available for default patterns
+    default_ignore_dirs_patterns = {'*.egg-info'} 
+    default_ignore_files = {'.DS_Store'} # Explicitly files
 
     print("Scanning directory structure (this may take a moment for large codebases)...")
     scan_count = 0
@@ -121,23 +121,35 @@ def collect_files_for_processing(codebase_path: Path, gitignore_patterns: list, 
         relative_root_path_str_for_dirs = str(current_root_path.relative_to(codebase_path)).replace('\\', '/')
         relative_root_path_prefix = "" if relative_root_path_str_for_dirs == '.' else relative_root_path_str_for_dirs + "/"
 
-        original_dirs = list(dirs); dirs[:] = []
+        original_dirs = list(dirs); dirs[:] = [] # Prune dirs in-place
         for d_name in original_dirs:
-            dir_relative_path_for_rules = (relative_root_path_prefix + d_name).replace('\\', '/')
+            # Default ignore checks (name based, simple patterns)
             if d_name.lower() in default_ignore_dirs_names: continue
             if any(fnmatch.fnmatch(d_name, pattern) for pattern in default_ignore_dirs_patterns): continue
-            if is_path_ignored(dir_relative_path_for_rules + '/', gitignore_patterns) or \
-               is_path_ignored(dir_relative_path_for_rules, gitignore_patterns):
+            
+            # Path for gitignore check (relative to codebase_path)
+            # pathspec expects paths like "src/somedir", not "src/somedir/" for directory name checks
+            dir_relative_path_for_rules = (relative_root_path_prefix + d_name).replace('\\', '/')
+            
+            if is_path_ignored_by_spec(dir_relative_path_for_rules, gitignore_spec):
                 continue
             dirs.append(d_name)
 
         for filename in files:
             if script_own_src_filename and filename == script_own_src_filename and current_root_path == codebase_path:
                 continue
+            
             file_path_obj = current_root_path / filename
+            # Path for gitignore check (relative to codebase_path)
             relative_file_path_str = (relative_root_path_prefix + filename).replace('\\', '/')
+
+            # Default file ignore checks
             if filename.lower() in default_ignore_files: continue
-            if is_path_ignored(relative_file_path_str, gitignore_patterns): continue
+            
+            # Gitignore check for files
+            if is_path_ignored_by_spec(relative_file_path_str, gitignore_spec):
+                continue
+            
             should_process, file_type = should_process_file(file_path_obj)
             if should_process:
                 files_to_process.append((file_path_obj, file_type, relative_file_path_str))
@@ -153,12 +165,25 @@ def run_processing(codebase_dir: str, output_file_str: str, script_own_src_filen
         sys.exit(1)
 
     gitignore_path = codebase_path / ".gitignore"
-    gitignore_patterns = parse_gitignore(gitignore_path)
-    if gitignore_patterns: print(f"Loaded {len(gitignore_patterns)} patterns from .gitignore")
-    else: print("No .gitignore file found or it's empty/unreadable.")
+    gitignore_spec = parse_gitignore(gitignore_path) # Returns a PathSpec object
+    
+    # gitignore_spec.patterns is a list of compiled regex patterns, not the raw strings.
+    # To show a count of original lines (excluding comments/empty), we'd need parse_gitignore to return that.
+    # For simplicity, we'll just indicate if a .gitignore was processed.
+    if gitignore_path.exists():
+        # The number of actual rules might be less than lines if some are invalid,
+        # but pathspec handles this internally. len(gitignore_spec.patterns) gives compiled pattern count.
+        if gitignore_spec and gitignore_spec.patterns: # Check if PathSpec object is not None and has patterns
+             print(f"Loaded .gitignore: {len(gitignore_spec.patterns)} effective rule(s) compiled.")
+        else:
+             print(f"Processed .gitignore at '{gitignore_path}', but it resulted in no effective rules (empty, all comments, or unreadable).")
+
+    else:
+        print("No .gitignore file found at the root of the target directory.")
+
 
     potential_files_to_process = collect_files_for_processing(
-        codebase_path, gitignore_patterns, script_own_src_filename
+        codebase_path, gitignore_spec, script_own_src_filename # Pass the PathSpec object
     )
 
     num_files = len(potential_files_to_process)
@@ -166,7 +191,7 @@ def run_processing(codebase_dir: str, output_file_str: str, script_own_src_filen
     print(f"Target directory: {codebase_path}")
     print(f"Found {num_files} file(s) to process.")
 
-    if not (codebase_path / ".git").is_dir():
+    if not (codebase_path / ".git").is_dir(): # Check for .git directory
         print("Warning: No '.git' directory found in the root of the target. This might not be a Git repository root.")
 
     if num_files == 0:
@@ -188,7 +213,6 @@ def run_processing(codebase_dir: str, output_file_str: str, script_own_src_filen
 
     print("\n--- Starting File Processing ---")
     
-    # --- Explicit Deletion of Existing Output File ---
     output_path_obj = Path(output_file_str)
     if output_path_obj.exists():
         try:
@@ -197,10 +221,7 @@ def run_processing(codebase_dir: str, output_file_str: str, script_own_src_filen
         except OSError as e:
             print(f"WARNING: Could not delete existing output file '{output_path_obj}': {e}")
             print("Attempting to proceed. If the file is still appending, this is the cause.")
-    # --- End of Explicit Deletion ---
 
-    # Open file for writing. If deletion failed, 'w' mode should still truncate.
-    # If it doesn't, there's a very strange OS/filesystem issue.
     try:
         with open(output_path_obj, 'w', encoding='utf-8') as out_f:
             processed_files_actual_count = 0
@@ -209,17 +230,14 @@ def run_processing(codebase_dir: str, output_file_str: str, script_own_src_filen
                     with open(file_path_obj, 'r', encoding='utf-8', errors='ignore') as f_content:
                         content = f_content.read()
                     
-                    # Write file path, type, and contents
                     out_f.write(f"File Path: {relative_file_path_str}\n")
                     out_f.write(f"Type: {file_type}\n")
                     out_f.write("File Contents:\n")
                     out_f.write(content)
-                    # Ensure content ends with a newline before our separator
                     if not content.endswith('\n'):
                         out_f.write('\n')
-                    out_f.write("-----\n") # Separator for this file block
+                    out_f.write("-----\n") 
                     
-                    # Add a blank line after the ----- separator if it's not the last file
                     if index < num_files - 1:
                         out_f.write("\n")
                         
@@ -228,12 +246,11 @@ def run_processing(codebase_dir: str, output_file_str: str, script_own_src_filen
                         print(f"Processed and written {processed_files_actual_count}/{num_files} files...")
                 
                 except Exception as e_file:
-                    # Write error info for this specific file to the output
                     out_f.write(f"File Path: {relative_file_path_str}\n")
                     out_f.write(f"Type: {file_type} (Error during processing)\n")
                     out_f.write(f"Error reading/processing file: {e_file}\n")
                     out_f.write("-----\n")
-                    if index < num_files - 1: # Also add blank line after error block
+                    if index < num_files - 1: 
                         out_f.write("\n")
                     print(f"Error processing file {file_path_obj}: {e_file}")
 
@@ -247,7 +264,7 @@ def run_processing(codebase_dir: str, output_file_str: str, script_own_src_filen
 
 # --- Command Line Interface ---
 def cli_entry():
-    print(f"CodeParser for LLM - Initializing...") # Print version early
+    print(f"CodeParser for LLM - Initializing...") 
     parser = argparse.ArgumentParser(
         description="Codebase to LLM Ingestible Format Converter.",
         formatter_class=argparse.RawTextHelpFormatter
